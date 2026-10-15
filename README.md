@@ -1,109 +1,76 @@
 # StochasticOrders.jl
 
-The stochastic orders, computed on samples.
+Stochastic dominance, computed on samples. Give it equal-length vectors of
+draws — MCMC chain columns, bootstrap replicates, Monte Carlo output — and get
+back a verdict, a margin by which dominance fails, or the undominated subset of
+a family. The only dependency is `Statistics`.
 
-> **Not** [StochasticDominance.jl](https://github.com/rajmadan96/StochasticDominance.jl),
-> which is a portfolio-optimization package: it finds asset allocations subject
-> to higher-order dominance constraints, and does `n`-th order dominance, which
-> this package does not. This one is about the *partial order over a family* —
-> the frontier, the antichain, the lattice, and the margins by which dominance
-> fails — with no optimizer and no dependency beyond `Statistics`. Two equal-length vectors of draws
-in; a verdict, a margin, or a frontier out.
+(Not to be confused with
+[StochasticDominance.jl](https://github.com/rajmadan96/StochasticDominance.jl),
+which optimizes portfolios under dominance constraints.)
+
+## Usage
 
 ```julia
 using StochasticOrders
 
-fosd(xs, ys)        # first-order: better for every increasing utility
-sosd(xs, ys)        # second-order: better for every risk-averse preference
-icx(xs, ys)         # increasing convex: the risk-seeking counterpart
-statewise(xs, ys)   # better draw by draw, if the inputs are index-aligned
-pgeq(xs, ys)        # P(x ≥ y) under that alignment
+# pairs
+fosd(xs, ys)        # first order: better for every increasing utility
+sosd(xs, ys)        # second order: better for every risk-averse utility
+icx(xs, ys)         # increasing convex: better for every risk-seeking utility
+statewise(xs, ys)   # better draw by draw (index-aligned inputs only)
+pgeq(xs, ys)        # P(x ≥ y) under the given alignment
+relate(xs, ys)      # :dominates, :dominated, :equal or :crossing
+margin(xs, ys)      # where and by how much dominance fails
 
-undominated(vs)     # indices nothing dominates — the maximal antichain
-dominating(vs)      # the greatest element, or `nothing`
+# families (a vector of sample vectors)
+undominated(vs)     # indices nothing dominates
+dominating(vs)      # index of the greatest element, or `nothing`
 robust(vs)          # undominated across a sweep of risk aversions
-margin(xs, ys)      # why it failed, and by how much
+regret(vs)          # each option's W₁ distance to the best-case envelope
+domgraph(vs)        # dominance relation as a G×G matrix; `hasse` reduces it
 ```
 
-No dependency beyond `Statistics`. Works on anything you have draws of: an
-MCMC chain's columns, a bootstrap, a CSV column, `MonteCarloMeasurements`
-particles.
+`relate`, `margin` and the family functions other than `robust` and `regret`
+take `order=:first` (default), `:second`, `:convex` or `:statewise`.
 
-## Why it is cheap
+## How it works
 
-For two equal-weight empirical measures, `F̂ₓ ≤ F̂ᵥ` pointwise iff the quantile
-functions reverse, and both are step functions with jumps at the *same* `i/N`.
-So the uncountable family of constraints collapses to exactly `N`, and the test
-is an order-statistic comparison — no grid, no KDE, no binning:
+For two equal-size empirical distributions, first-order dominance holds iff
+the sorted samples are ordered elementwise:
 
 ```julia
 all(sort(xs) .>= sort(ys))
 ```
 
-`O(N log N)`, and **exact on the empirical measures**: the predicate computed is
-precisely the predicate defined. Everything else is that same sorted difference
-under a different reduction. With `d = sort(xs) .- sort(ys)`:
+This is exact on the empirical measures, `O(N log N)`, with no grids or
+density estimation. Second order uses cumulative sums of the sorted samples,
+and the convex order uses upper partial sums. The margin, Wasserstein distance
+and lattice operations (`⊔`, `⊓`, `envelope`) are all reductions of the same
+sorted difference.
 
-| reduction | meaning |
-|---|---|
-| `minimum(d) >= 0` | first-order dominance |
-| `mean(max.(-d, 0))` | `V₁`, the one-sided W₁ violation; zero iff dominance holds |
-| `mean(abs.(d))` | Wasserstein-1 |
-| `mean(d)` | `E[x] - E[y]`, and equal to W₁ when dominance holds |
-| `max.(sort, sort)` | the lattice join, `⊔` |
-| `cumsum(sort(·))` | second-order dominance |
+This only works with **equal sample counts**, so every function checks it.
 
-Equal length is what makes the collapse work. With `N ≠ M` you would have to
-compare on the union of breakpoints and the index-wise test is simply wrong, so
-every entry point checks.
+## Caveats
 
-## Read it as a decision rule, not a test
+**It's a decision rule, not a hypothesis test.** There's no size or power.
+Dominance is a conjunction of `N` inequalities, the most fragile of which
+involve the sample extremes, so it's biased against declaring dominance. For
+confidence statements, use a bootstrap test (e.g. Barrett–Donald).
 
-There is no size and no power. The predicate is a conjunction of `N`
-inequalities, so it is heavily biased *against* declaring dominance, and its
-two most fragile constraints — `i = 1` and `i = N` — are the noisiest
-quantities in the sample. For a confidence statement you want a
-Barrett–Donald-style bootstrap, which this package does not do.
+**Coupled samples help a lot.** If inputs are index-aligned draws of the same
+randomness (common random numbers, a shared chain), the test is far sharper
+than on independent samples. Alignment is also what makes `statewise` and
+`pgeq` meaningful at all.
 
-What rescues it in practice is **coupling**. If the vectors are index-aligned
-draws of the same underlying randomness — common random numbers, a shared
-chain, a library that propagates correlations — their sorted versions are
-positively dependent and the test sharpens enormously. `xs = ys .+ δ` passes at
-a single draw; two independent samples with the same marginals need `δ` to clear
-the extreme-order-statistic noise.
+**Expect most pairs to be incomparable.** First-order dominance between two
+location-scale distributions requires equal scale, so options that differ in
+risk usually cross. Second order fails often too, since the riskier option
+tends to have the higher mean. Hence `undominated` typically returns nearly
+everything, and the informative functions are `margin`, `regret` and `robust`.
 
-## Expect nothing to dominate
-
-First-order dominance requires the extreme order statistics to be ordered, and
-between two location-scale distributions it requires *equal scale*. It is
-essentially a same-shape-shifted relation, so any two options differing in
-spread are incomparable after two comparisons. In a decision whose whole point
-is that the options differ in risk, that is nearly every pair.
-
-`undominated` therefore returns nearly everything — and needs no sentinel, since
-"nothing dominates anything" and "everything is undominated" are the same
-statement. `dominating` is where `nothing` belongs, as with `findfirst`.
-
-Second-order dominance bites more often but has its own asymmetry: its `k = N`
-constraint is `E[x] ≥ E[y]`, and the risky option usually has the higher mean,
-so the safe one fails on the mean while the risky one fails on the left tail.
-
-So the functions that actually discriminate are `margin`, `regret`, and
-`robust`. A margin localises the failure — "fails at 2.6% of quantile levels,
-all above p = 0.97, worst 0.41, `P(x ≥ y) = 0.94`" is a decision; `false` is
-not. `robust` sweeps exponential-utility risk aversion and keeps what survives
-every setting, which is the claim a decision-maker can act on.
-
-## The lattice
-
-`⊔` and `⊓` are the join and meet — the pointwise minimum of two cdfs is a cdf,
-and cdf-min is quantile-max, so the join is `max.(sort(xs), sort(ys))`. `⊔` sits
-in Julia's precedence group 11 (with `+`), `⊓` in group 12 (with `*`); neither
-is in Base.
-
-A finite family forms a *poset* under dominance, not a lattice — the join is
-generally none of its members. `envelope(vs)` materialises it anyway as an
-unattainable best case, which is what `regret` measures distance to.
+**Second and convex orders need integrable tails.** On samples from e.g. a
+Cauchy they will return a verdict about a quantity that doesn't exist.
 
 ## Tests
 
